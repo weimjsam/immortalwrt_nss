@@ -1,22 +1,53 @@
 #!/bin/sh
 
-nft list table inet fw4 > /dev/null 2>&1 || exit 0
+FW_SCRIPT="/etc/init.d/firewall"
 
-if ! nft list chain inet fw4 ecm_rate_limit > /dev/null 2>&1; then
-	nft add chain inet fw4 ecm_rate_limit
-fi
 
-nft flush chain inet fw4 ecm_rate_limit
-nft add rule inet fw4 ecm_rate_limit limit rate 1000/second burst 1000 packets counter return
-nft add rule inet fw4 ecm_rate_limit counter drop
+# =========================================================
+# Qualcomm NSS & Linux Network Stack Ultimate Optimization
+# =========================================================
 
-nft list chain inet fw4 forward_wan > /dev/null 2>&1 || exit 0
+nft insert rule inet fw4 forward tcp flags syn tcp option maxseg size set rt mtu
+echo "0" > /sys/kernel/debug/ecm/ecm_classifier_default/accel_delay_pkts
 
-handle=$(nft -a list chain inet fw4 forward_wan 2> /dev/null \
-	| sed -n '/!fw4: ECM Rate Limit 1000\/pps/ s/.* handle \([0-9][0-9]*\)$/\1/p')
+echo 65535 > /proc/sys/net/netfilter/nf_conntrack_max 2>/dev/null 
+echo 300 > /proc/sys/net/netfilter/nf_conntrack_tcp_timeout_established 2>/dev/null 
 
-for rule in $handle; do
-	nft delete rule inet fw4 forward_wan handle "$rule"
-done
+sysctl -w net.netfilter.nf_conntrack_tcp_timeout_close=10
+sysctl -w net.netfilter.nf_conntrack_tcp_timeout_close_wait=10
+sysctl -w net.netfilter.nf_conntrack_tcp_timeout_fin_wait=30
+sysctl -w net.netfilter.nf_conntrack_tcp_timeout_last_ack=30
+sysctl -w net.netfilter.nf_conntrack_tcp_timeout_syn_recv=30
+sysctl -w net.netfilter.nf_conntrack_tcp_timeout_syn_sent=30
+sysctl -w net.netfilter.nf_conntrack_tcp_timeout_time_wait=30
 
-nft add rule inet fw4 forward_wan ct state new counter jump ecm_rate_limit comment '"!fw4: ECM Rate Limit 1000/pps"'
+sysctl -w net.netfilter.nf_conntrack_udp_timeout=5
+sysctl -w net.netfilter.nf_flowtable_udp_timeout=5
+sysctl -w net.netfilter.nf_conntrack_udp_timeout_stream=30
+
+# 網卡隊列 RPS/XPS/rps_flow_cnt 擴充優化
+for dev in /sys/class/net/*/queues/rx-*/rps_cpus; do echo "f" > "$dev" 2>/dev/null; done
+for dev in /sys/class/net/*/queues/rx-*/rps_flow_cnt; do echo "8192" > "$dev" 2>/dev/null; done
+for dev in /sys/class/net/*/queues/tx-*/xps_cpus; do echo "f" > "$dev" 2>/dev/null; done
+echo "65535" > "/proc/sys/net/core/rps_sock_flow_entries" 2>/dev/null 
+
+# 扩容 NSS Core 0 额外报文缓冲区池到 10MB
+sysctl -w dev.nss.n2hcfg.extra_pbuf_core0=10000000 >/dev/null 2>/dev/null
+
+# 提升 N2H 接收高水位线至 67392，避免大流量过早触发分配失败
+sysctl -w dev.nss.n2hcfg.n2h_high_water_core0=67392 >/dev/null 2>/dev/null
+
+# 扩容无线缓冲池到 10240，消除 Wi-Fi 芯片高并发阻塞
+sysctl -w dev.nss.n2hcfg.n2h_wifi_pool_buf=10240 >/dev/null 2>/dev/null
+
+# 增大 Core 0 原生队列限制到 2048
+sysctl -w dev.nss.n2hcfg.n2h_queue_limit_core0=2048 >/dev/null 2>/dev/null
+
+# 增大 Linux 内核网络回流队列上限
+sysctl -w net.core.netdev_max_backlog=10000 >/dev/null 2>/dev/null
+
+# 增大单个周期处理报文预算到 600
+sysctl -w net.core.netdev_budget=600 >/dev/null 2>/dev/null
+
+# 软中断最长占用时间调整（ hybrid 代理环境推荐 8000-10000，纯转发推荐 20000 ）
+sysctl -w net.core.netdev_budget_usecs=10000 >/dev/null 2>/dev/null
