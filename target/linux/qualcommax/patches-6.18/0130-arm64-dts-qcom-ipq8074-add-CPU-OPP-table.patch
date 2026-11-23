@@ -7,8 +7,8 @@ Remove lower frequency OPPs to force the SoC to run exclusively at 2.2GHz.
 
 Signed-off-by: Robert Marko <robimarko@gmail.com>
 ---
- arch/arm64/boot/dts/qcom/ipq8074.dtsi | 17 +++++++++++++++++
- 1 file changed, 17 insertions(+)
+ arch/arm64/boot/dts/qcom/ipq8074.dtsi | 52 +++++++++++++++++++++++++++
+ 1 file changed, 52 insertions(+)
 
 --- a/arch/arm64/boot/dts/qcom/ipq8074.dtsi
 +++ b/arch/arm64/boot/dts/qcom/ipq8074.dtsi
@@ -44,7 +44,7 @@ Signed-off-by: Robert Marko <robimarko@gmail.com>
  		};
  
  		l2_0: l2-cache {
-@@ -84,6 +88,19 @@
+@@ -84,6 +88,54 @@
  		};
  	};
  
@@ -59,6 +59,41 @@ Signed-off-by: Robert Marko <robimarko@gmail.com>
 +			opp-supported-hw = <0xf>;
 +			clock-latency-ns = <200000>;
 +		};
++
++
++
++
++
++
++
++
++
++
++
++
++
++
++
++
++
++
++
++
++
++
++
++
++
++
++
++
++
++
++
++
++
++
++
 +	};
 +
  	pmu {
