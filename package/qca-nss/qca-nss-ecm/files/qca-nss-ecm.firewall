@@ -2,52 +2,61 @@
 
 FW_SCRIPT="/etc/init.d/firewall"
 
+# 1. 开启 fw4 原生 MSS 钳制（幂等操作，避免重复插入 nft 规则）
+uci set firewall.@zone[1].mtu_fix='1' 2>/dev/null
+uci commit firewall 2>/dev/null
 
-# =========================================================
-# Qualcomm NSS & Linux Network Stack Ultimate Optimization
-# =========================================================
+# 2. Hybrid 代理环境下延迟 3 个包再触发 NSS 硬件卸载，大幅减少 ipv4_flushes
+[ -f /sys/kernel/debug/ecm/ecm_classifier_default/accel_delay_pkts ] && \
+    echo "3" > /sys/kernel/debug/ecm/ecm_classifier_default/accel_delay_pkts
 
-nft insert rule inet fw4 forward tcp flags syn tcp option maxseg size set rt mtu
-echo "0" > /sys/kernel/debug/ecm/ecm_classifier_default/accel_delay_pkts
+# 3. 固定 sk_buff 环形回收池上限，缓冲区直接复用不反复申请/释放
+[ -f /proc/net/skb_recycler/max_skbs ] && echo "2048" > /proc/net/skb_recycler/max_skbs
+[ -f /proc/net/skb_recycler/max_spare_skbs ] && echo "512" > /proc/net/skb_recycler/max_spare_skbs
 
-echo 65535 > /proc/sys/net/netfilter/nf_conntrack_max 2>/dev/null 
-echo 300 > /proc/sys/net/netfilter/nf_conntrack_tcp_timeout_established 2>/dev/null 
+# 4. 连接跟踪内存与超时收敛（适配 512MB RAM + QUIC/游戏稳态）
+sysctl -w net.netfilter.nf_conntrack_max=32768 >/dev/null 2>&1
+sysctl -w net.netfilter.nf_conntrack_tcp_timeout_established=300 >/dev/null 2>&1
+sysctl -w net.netfilter.nf_conntrack_tcp_timeout_close=10 >/dev/null 2>&1
+sysctl -w net.netfilter.nf_conntrack_tcp_timeout_close_wait=10 >/dev/null 2>&1
+sysctl -w net.netfilter.nf_conntrack_tcp_timeout_fin_wait=30 >/dev/null 2>&1
+sysctl -w net.netfilter.nf_conntrack_tcp_timeout_last_ack=30 >/dev/null 2>&1
+sysctl -w net.netfilter.nf_conntrack_tcp_timeout_syn_recv=30 >/dev/null 2>&1
+sysctl -w net.netfilter.nf_conntrack_tcp_timeout_syn_sent=30 >/dev/null 2>&1
+sysctl -w net.netfilter.nf_conntrack_tcp_timeout_time_wait=30 >/dev/null 2>&1
 
-sysctl -w net.netfilter.nf_conntrack_tcp_timeout_close=10
-sysctl -w net.netfilter.nf_conntrack_tcp_timeout_close_wait=10
-sysctl -w net.netfilter.nf_conntrack_tcp_timeout_fin_wait=30
-sysctl -w net.netfilter.nf_conntrack_tcp_timeout_last_ack=30
-sysctl -w net.netfilter.nf_conntrack_tcp_timeout_syn_recv=30
-sysctl -w net.netfilter.nf_conntrack_tcp_timeout_syn_sent=30
-sysctl -w net.netfilter.nf_conntrack_tcp_timeout_time_wait=30
+sysctl -w net.netfilter.nf_conntrack_udp_timeout=15 >/dev/null 2>&1
+sysctl -w net.netfilter.nf_flowtable_udp_timeout=30 >/dev/null 2>&1
+sysctl -w net.netfilter.nf_conntrack_udp_timeout_stream=60 >/dev/null 2>&1
 
-sysctl -w net.netfilter.nf_conntrack_udp_timeout=10
-sysctl -w net.netfilter.nf_flowtable_udp_timeout=10
-sysctl -w net.netfilter.nf_conntrack_udp_timeout_stream=30
+# 5. 仅对物理网口启用适度 RPS/XPS，避免虚拟接口无效开销与内存浪费
+echo "16384" > /proc/sys/net/core/rps_sock_flow_entries 2>/dev/null
+for iface in eth0 eth1 wan lan1 lan2 lan3; do
+    for dev in /sys/class/net/${iface}/queues/rx-*/rps_cpus; do [ -f "$dev" ] && echo "f" > "$dev" 2>/dev/null; done
+    for dev in /sys/class/net/${iface}/queues/rx-*/rps_flow_cnt; do [ -f "$dev" ] && echo "2048" > "$dev" 2>/dev/null; done
+    for dev in /sys/class/net/${iface}/queues/tx-*/xps_cpus; do [ -f "$dev" ] && echo "f" > "$dev" 2>/dev/null; done
+done
 
-# 網卡隊列 RPS/XPS/rps_flow_cnt 擴充優化
-for dev in /sys/class/net/*/queues/rx-*/rps_cpus; do echo "f" > "$dev" 2>/dev/null; done
-for dev in /sys/class/net/*/queues/rx-*/rps_flow_cnt; do echo "8192" > "$dev" 2>/dev/null; done
-for dev in /sys/class/net/*/queues/tx-*/xps_cpus; do echo "f" > "$dev" 2>/dev/null; done
-echo "65535" > "/proc/sys/net/core/rps_sock_flow_entries" 2>/dev/null 
+# 6. 内核网络队列与软中断预算（防 512MB 队列堆积与 Bufferbloat）
+sysctl -w net.core.netdev_max_backlog=2048 >/dev/null 2>&1    # Linux 内核网络回流队列上限
+sysctl -w net.core.netdev_budget=600 >/dev/null 2>&1          # 单个周期处理报文预算到 600
+sysctl -w net.core.netdev_budget_usecs=8000 >/dev/null 2>&1   # 软中断最长占用时间调整 8000
+ 
+# 7. 内核保留空闲内存水位（防止突发原子分配失败）
+sysctl -w vm.min_free_kbytes=16384 >/dev/null 2>&1
 
-# 扩容 NSS Core 0 额外报文缓冲区池到 10MB
+# 扩容 NSS Core 0 额外报文缓冲区池到 ～10M
 sysctl -w dev.nss.n2hcfg.extra_pbuf_core0=10000000 >/dev/null 2>/dev/null
 
-# 提升 N2H 接收高水位线至 67392，避免大流量过早触发分配失败
-sysctl -w dev.nss.n2hcfg.n2h_high_water_core0=67392 >/dev/null 2>/dev/null
+# 提升 N2H 接收高水位线至 36864，避免大流量过早触发分配失败
+sysctl -w dev.nss.n2hcfg.n2h_high_water_core0=36864 >/dev/null 2>/dev/null
 
-# 扩容无线缓冲池到 10240，消除 Wi-Fi 芯片高并发阻塞
-sysctl -w dev.nss.n2hcfg.n2h_wifi_pool_buf=10240 >/dev/null 2>/dev/null
+# 扩容无线缓冲池到 8192，消除 Wi-Fi 芯片高并发阻塞
+sysctl -w dev.nss.n2hcfg.n2h_wifi_pool_buf=8192 >/dev/null 2>/dev/null
 
-# 增大 Core 0 原生队列限制到 2048
+# Core 0 原生队列限制到 2048
 sysctl -w dev.nss.n2hcfg.n2h_queue_limit_core0=2048 >/dev/null 2>/dev/null
 
-# 增大 Linux 内核网络回流队列上限
-sysctl -w net.core.netdev_max_backlog=10000 >/dev/null 2>/dev/null
-
-# 增大单个周期处理报文预算到 600
-sysctl -w net.core.netdev_budget=600 >/dev/null 2>/dev/null
-
-# 软中断最长占用时间调整（ hybrid 代理环境推荐 8000-10000，纯转发推荐 20000 ）
-sysctl -w net.core.netdev_budget_usecs=10000 >/dev/null 2>/dev/null
+# 开启满血频率
+sysctl -w dev.nss.clock.auto_scale=0
+sysctl -w dev.nss.clock.current_freq=1689600000
